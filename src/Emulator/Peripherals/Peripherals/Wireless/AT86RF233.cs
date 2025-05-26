@@ -15,14 +15,68 @@ namespace Antmicro.Renode.Peripherals.Wireless
 {
     public class AT86RF233 : ISPIPeripheral, IRadio, IGPIOReceiver
     {
-        public AT86RF233()
+        public AT86RF233(GPIO irq = null)
         {
-            IRQ = new GPIO();
+            IRQ = irq ?? new GPIO();
             Reset();
+            this.Log(LogLevel.Info, $"IRQ connected to: {IRQ.ToString()}");
+        }
+
+        // public void SendTestFrame()
+        // {
+        //     var testFrame = new byte[] { 0x03, 0x41, 0x42, 0x43};
+        //     ReceiveFrame(testFrame, null);
+        // }
+
+        // public void SendTestFrame()
+        // {
+        //     // Frame payload: [0x03, 0x41, 0x42, 0x43] -> PHR + 3 bytes payload (A, B, C)
+        //     var payload = new byte[] { 0x03, 0x41, 0x42, 0x43 };
+
+        //     // Calculate CRC over all but last 2 bytes (we'll add those)
+        //     var crc = Frame.CalculateCRC(payload);
+
+        //     // Combine payload + CRC
+        //     var fullFrame = new byte[payload.Length + 2];
+        //     Array.Copy(payload, fullFrame, payload.Length);
+        //     fullFrame[fullFrame.Length - 2] = crc[0];
+        //     fullFrame[fullFrame.Length - 1] = crc[1];
+
+        //     this.Log(LogLevel.Info, "Sending test frame: {0}", fullFrame.ToString());
+
+        //     ReceiveFrame(fullFrame, null);
+        // }
+
+        public void SendTestFrame()
+        {
+            // Create dynamic message
+            var message = $"Radio transmission {transmissionCount}";
+            var messageBytes = System.Text.Encoding.ASCII.GetBytes(message);
+
+            // Build payload: [PHR] + message
+            var payload = new byte[1 + messageBytes.Length];
+            payload[0] = (byte)messageBytes.Length; // PHR: payload length
+            Array.Copy(messageBytes, 0, payload, 1, messageBytes.Length);
+
+            // Compute CRC over entire payload
+            var crc = Frame.CalculateCRC(payload);
+
+            // Final frame: payload + CRC
+            var fullFrame = new byte[payload.Length + 2];
+            Array.Copy(payload, fullFrame, payload.Length);
+            fullFrame[fullFrame.Length - 2] = crc[0];
+            fullFrame[fullFrame.Length - 1] = crc[1];
+
+            this.Log(LogLevel.Info, "Sending test frame: {0}", message);
+
+            ReceiveFrame(fullFrame, null);
+
+            transmissionCount++; // Increment for next call
         }
 
         public void ReceiveFrame(byte[] frame, IRadio sender)
         {
+            this.DebugLog("Received frame from zigbee");
             this.DebugLog("Frame of length {0} received.", frame.Length);
             if(frame.Length == 0)
             {
@@ -49,6 +103,8 @@ namespace Antmicro.Renode.Peripherals.Wireless
             accessMode = AccessMode.Command;
             frameBuffer = new byte[0];
             deferredFrameBuffer = null;
+            // IRQ.Unset();
+            this.Log(LogLevel.Warning, "RESET CALLED!");
         }
 
         public void OnGPIO(int number, bool value)
@@ -66,9 +122,10 @@ namespace Antmicro.Renode.Peripherals.Wireless
             }
         }
 
+        //receives and send data from/to the STM32 (via SPI)
         public byte Transmit(byte data)
         {
-            this.DebugLog("Byte received: 0x{0:X}", data);
+            // this.DebugLog("Byte received: 0x{0:X}", data);
             switch(accessMode)
             {
             case AccessMode.Command:
@@ -78,10 +135,12 @@ namespace Antmicro.Renode.Peripherals.Wireless
                 var result = (byte)0;
                 if(accessType == AccessType.ReadAccess)
                 {
+                    this.DebugLog("RegisterAccess | Begin sending data to STM32 | Byte: 0x{0:X}", data);
                     result = HandleRegisterRead((Registers)context);
                 }
                 else
                 {
+                    this.DebugLog("RegisterAccess | RX data from STM32 | Byte: 0x{0:X}", data);
                     HandleRegisterWrite((Registers)context, data);
                 }
                 accessMode = AccessMode.Command;
@@ -89,10 +148,12 @@ namespace Antmicro.Renode.Peripherals.Wireless
             case AccessMode.FrameBufferAccess:
                 if(accessType == AccessType.ReadAccess)
                 {
+                    this.DebugLog("FrameBufferAccess | Begin sending data to STM32");
                     return HandleFrameBufferRead(context++);
                 }
                 else
                 {
+                    this.DebugLog("RX data from STM32 | Byte: 0x{0:X}", data);
                     HandleFrameBufferWrite(context++, data);
                 }
                 break;
@@ -140,7 +201,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
             else
             {
                 context = -1;
-                this.DebugLog("Command received: {0} {1}", accessMode.ToString(), accessType.ToString());
+                this.DebugLog("Command received: {0} {1}", accessMode.ToString(), accessType.ToString());                
             }
         }
 
@@ -179,6 +240,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
 
         private byte HandleRegisterRead(Registers register)
         {
+            this.Log(LogLevel.Noisy, "Begin sending data to STM32 2", register);
             this.Log(LogLevel.Noisy, "Reading register {0}.", register);
             switch(register)
             {
@@ -253,13 +315,15 @@ namespace Antmicro.Renode.Peripherals.Wireless
 
         private byte HandleFrameBufferRead(int index)
         {
+            // this.Log(LogLevel.Warning, "HandlaFrameBuffeRead INDEX: {0}", index);
             if(index == -1)
             {
                 // this means we have to send PHR byte indicating frame length
                 return (byte)frameBuffer.Length;
             }
             if(context < frameBuffer.Length)
-            {
+            {                
+                this.Log(LogLevel.Info, "Sent byte 0x{0:X}", frameBuffer[context]);
                 return frameBuffer[index];
             }
             if(index == frameBuffer.Length)
@@ -275,8 +339,17 @@ namespace Antmicro.Renode.Peripherals.Wireless
             if(index == frameBuffer.Length + 2)
             {
                 accessMode = AccessMode.Command;
+                context = -1;
                 // send RX_STATUS
                 return 0x80; // CRC ok
+            }
+            // NEW: reset if we read too far
+            if(index > frameBuffer.Length + 2)
+            {
+                this.Log(LogLevel.Warning, "Read past end of frame. Resetting accessMode.");
+                accessMode = AccessMode.Command;
+                context = -1;
+                return 0;
             }
             return 0;
         }
@@ -296,35 +369,42 @@ namespace Antmicro.Renode.Peripherals.Wireless
             {
                 SendPacket();
                 accessMode = AccessMode.Command;
+                index = 0;
             }
         }
 
         private void SendPacket()
         {
+            this.Log(LogLevel.Info, "Sending data via zigbee");
             var frameSent = FrameSent;
             if(frameSent == null)
             {
-                this.NoisyLog("Could not sent packet as there is no frame handler attached.");
-                return;
+                // this.NoisyLog("Could not sent packet as there is no frame handler attached.");
+                // return;
             }
 
-            if(autoCrc)
-            {
-                if(frameBuffer.Length >= 2)
-                {
-                    // replace buffer's last two bytes with calculated CRC
-                    var frameDataLenght = frameBuffer.Length - 2;
-                    var crc = Frame.CalculateCRC(frameBuffer.Take(frameDataLenght));
-                    Array.Copy(crc, 0, frameBuffer, frameDataLenght, 2);
-                }
-                else
-                {
-                    this.Log(LogLevel.Warning, "Sending short frame (length {0}) - CRC is not calculated.", frameBuffer.Length);
-                }
-            }
+            // if(autoCrc)
+            // {
+            //     if(frameBuffer.Length >= 2)
+            //     {
+            //         // replace buffer's last two bytes with calculated CRC
+            //         var frameDataLenght = frameBuffer.Length - 2;
+            //         var crc = Frame.CalculateCRC(frameBuffer.Take(frameDataLenght));
+            //         Array.Copy(crc, 0, frameBuffer, frameDataLenght, 2);
+            //     }
+            //     else
+            //     {
+            //         this.Log(LogLevel.Warning, "Sending short frame (length {0}) - CRC is not calculated.", frameBuffer.Length);
+            //     }
+            // }
 
-            frameSent(this, frameBuffer);
+            // frameSent(this, frameBuffer);
             this.DebugLog("Frame of length {0} sent.", frameBuffer.Length);
+            this.DebugLog("Setting IRQ");
+            IRQ.Set();
+
+            frameBuffer = new byte[0]; // clear buffer to avoid stale content
+            context = -1;
         }
 
         private OperatingMode operatingMode;
@@ -342,6 +422,8 @@ namespace Antmicro.Renode.Peripherals.Wireless
         // returns channel busy state and only when the radio switches to RxOn mode the frame
         // is actualy received
         private byte[] deferredFrameBuffer;
+
+        private int transmissionCount = 1;
 
         private enum OperatingMode : byte
         {

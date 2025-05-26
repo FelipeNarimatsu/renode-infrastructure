@@ -270,6 +270,18 @@ namespace Antmicro.Renode.Peripherals.CRC
                     reversibleIO = true,
                     independentDataWidth = IndependentDataWidth.Bits32,
                 }
+            },
+            // New L4 configuration
+            {
+                STM32Series.L4,
+                new STM32Config()
+                {
+                    configurablePoly = true,
+                    configurableInitialValue = true,
+                    hasPolySizeBits = true,
+                    reversibleIO = true,
+                    independentDataWidth = IndependentDataWidth.Bits32,
+                }
             }
         };
         private readonly bool configurablePoly;

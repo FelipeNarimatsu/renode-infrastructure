@@ -12,6 +12,7 @@ namespace Antmicro.Renode.Peripherals
             F0,
             F4,
             WBA,
+            L4,
         }
 }
 
